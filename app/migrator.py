@@ -88,7 +88,8 @@ class PaperlessAPI:
     def test_connection(self) -> dict:
         """Testet ob die Verbindung funktioniert. Gibt Status zurück."""
         try:
-            resp = self.session.get(f"{self.base_url}/api/", timeout=10)
+            # /api/tags/ ist ein stabiler JSON-Endpoint der in allen Versionen funktioniert
+            resp = self.session.get(f"{self.base_url}/api/tags/?page_size=1", timeout=10)
             resp.raise_for_status()
             return {"ok": True, "message": "Verbindung erfolgreich"}
         except requests.exceptions.ConnectionError:
