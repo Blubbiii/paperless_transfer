@@ -8,15 +8,30 @@ import json
 import queue
 import threading
 import uuid
+import time
 from flask import Flask, render_template, request, jsonify, Response
 
-from migrator import PaperlessAPI, MigrationRunner
+from migrator import PaperlessAPI, MigrationRunner, normalize_url
 
 app = Flask(__name__)
 
 # Aktive Migration-Sessions
 sessions = {}
 migration_lock = threading.Lock()
+
+# Sessions nach 1 Stunde aufräumen
+SESSION_MAX_AGE = 3600
+
+
+def cleanup_sessions():
+    """Entfernt alte, beendete Sessions."""
+    now = time.time()
+    to_remove = []
+    for sid, session in sessions.items():
+        if not session["thread"].is_alive() and now - session["created"] > SESSION_MAX_AGE:
+            to_remove.append(sid)
+    for sid in to_remove:
+        del sessions[sid]
 
 
 @app.route("/")
@@ -28,24 +43,30 @@ def index():
 def test_connection():
     """Testet die Verbindung zu einer Paperless-Instanz."""
     data = request.get_json()
-    url = data.get("url", "").strip().rstrip("/")
-    token = data.get("token", "").strip()
+    if not data:
+        return jsonify({"ok": False, "message": "Keine Daten empfangen."}), 400
+
+    url = (data.get("url") or "").strip()
+    token = (data.get("token") or "").strip()
 
     if not url or not token:
         return jsonify({"ok": False, "message": "URL und Token sind erforderlich."})
 
+    url = normalize_url(url)
     api = PaperlessAPI(url, token)
     result = api.test_connection()
 
-    # Wenn erfolgreich, auch Statistiken holen
+    # Wenn erfolgreich, Statistiken und Version holen
     if result["ok"]:
         try:
-            stats = {}
-            for resource in ["tags", "correspondents", "document_types",
-                             "storage_paths", "documents"]:
-                items = api.get_all(resource)
-                stats[resource] = len(items)
-            result["stats"] = stats
+            result["stats"] = api.get_stats()
+        except Exception:
+            result["stats"] = {}
+
+        try:
+            version = api.get_version()
+            if version and version != "unbekannt":
+                result["version"] = version
         except Exception:
             pass
 
@@ -55,25 +76,36 @@ def test_connection():
 @app.route("/api/migrate/start", methods=["POST"])
 def start_migration():
     """Startet die Migration."""
+    cleanup_sessions()
+
     # Prüfen ob bereits eine Migration läuft
     with migration_lock:
         for sid, session in sessions.items():
             if session["thread"].is_alive():
                 return jsonify({
                     "ok": False,
-                    "message": "Es läuft bereits eine Migration."
+                    "message": "Es läuft bereits eine Migration. Bitte warten oder abbrechen."
                 }), 409
 
     data = request.get_json()
+    if not data:
+        return jsonify({"ok": False, "message": "Keine Daten empfangen."}), 400
 
-    source_url = data.get("source_url", "").strip().rstrip("/")
-    source_token = data.get("source_token", "").strip()
-    target_url = data.get("target_url", "").strip().rstrip("/")
-    target_token = data.get("target_token", "").strip()
+    source_url = normalize_url((data.get("source_url") or "").strip())
+    source_token = (data.get("source_token") or "").strip()
+    target_url = normalize_url((data.get("target_url") or "").strip())
+    target_token = (data.get("target_token") or "").strip()
     migrate_options = data.get("migrate", {})
 
     if not all([source_url, source_token, target_url, target_token]):
         return jsonify({"ok": False, "message": "Alle Felder sind erforderlich."}), 400
+
+    # Gleiche-Instanz-Check
+    if source_url == target_url:
+        return jsonify({
+            "ok": False,
+            "message": "Quelle und Ziel dürfen nicht die gleiche Instanz sein!"
+        }), 400
 
     if not any(migrate_options.values()):
         return jsonify({"ok": False, "message": "Mindestens eine Option muss ausgewählt sein."}), 400
@@ -98,6 +130,7 @@ def start_migration():
         "thread": thread,
         "queue": progress_queue,
         "cancel": cancel_event,
+        "created": time.time(),
     }
 
     thread.start()
@@ -123,8 +156,13 @@ def migration_progress(session_id):
                 if event.get("type") in ("complete", "cancelled"):
                     break
             except queue.Empty:
-                # Keepalive
+                # Keepalive senden damit die Verbindung nicht abbricht
                 yield ": keepalive\n\n"
+
+                # Wenn der Thread nicht mehr läuft und Queue leer ist, beenden
+                if not session["thread"].is_alive():
+                    yield f'data: {json.dumps({"type": "complete", "message": "Verbindung zum Worker verloren", "summary": {}})}\n\n'
+                    break
 
     return Response(
         event_stream(),
@@ -132,6 +170,7 @@ def migration_progress(session_id):
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 

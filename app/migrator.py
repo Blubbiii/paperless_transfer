@@ -6,6 +6,8 @@ Migriert alles von einer Paperless-ngx Instanz auf eine andere:
   - Custom Fields, Saved Views
   - Mail Accounts, Mail Rules, Workflows
   - Dokumente (PDFs inkl. Metadaten, Tags, Notizen, Custom Field Values)
+
+Kompatibel mit Paperless-ngx v1.x und v2.x.
 """
 
 import requests
@@ -15,13 +17,16 @@ import time
 import queue
 import threading
 from pathlib import Path
-from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 
 
 # Felder die NICHT kopiert werden sollen (sind instanz-spezifisch)
 SKIP_FIELDS = {
     "id", "document_count", "last_correspondence",
     "owner", "permissions", "user_can_change",
+    "slug",                    # auto-generiert aus Name
+    "set_permissions",         # write-only Feld
+    "notes",                   # bei Dokumenten separat behandelt
 }
 
 # Felder die Referenzen auf andere Objekte sind (ID-Mapping nötig)
@@ -68,22 +73,37 @@ RESOURCE_LABELS = {
     "document_notes": "Dokument-Notizen",
 }
 
+# Endpoints die erst in neueren Versionen existieren
+OPTIONAL_ENDPOINTS = {"custom_fields", "workflows", "storage_paths"}
+
 DOWNLOAD_DIR = "/tmp/paperless_downloads"
 DOCUMENT_POLL_TIMEOUT = 300
 DOCUMENT_POLL_INTERVAL = 5
+
+
+def normalize_url(url: str) -> str:
+    """Stellt sicher dass die URL ein Schema hat und kein Trailing Slash."""
+    url = url.strip().rstrip("/")
+    if not url:
+        return url
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "http://" + url
+    return url
 
 
 class PaperlessAPI:
     """Wrapper für die Paperless-ngx REST API."""
 
     def __init__(self, base_url: str, token: str):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_url(base_url)
         self.token = token
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Token {token}",
             "Accept": "application/json",
         })
+        self._version = None
+        self._available_endpoints = None
 
     def test_connection(self) -> dict:
         """Testet ob die Verbindung funktioniert. Gibt Status zurück."""
@@ -101,24 +121,112 @@ class PaperlessAPI:
                 return {"ok": False, "message": "Authentifizierung fehlgeschlagen. Token ungültig."}
             if e.response is not None and e.response.status_code == 403:
                 return {"ok": False, "message": "Zugriff verweigert. Token hat keine Berechtigung."}
-            return {"ok": False, "message": f"HTTP-Fehler: {e}"}
+            return {"ok": False, "message": f"HTTP-Fehler {e.response.status_code}: {e}"}
         except Exception as e:
             return {"ok": False, "message": f"Fehler: {e}"}
+
+    def get_version(self) -> str:
+        """Versucht die Paperless-ngx Version zu ermitteln."""
+        if self._version is not None:
+            return self._version
+
+        # Verschiedene Wege die Version zu bekommen
+        for endpoint in ["/api/ui_settings/", "/api/remote_version/"]:
+            try:
+                resp = self.session.get(f"{self.base_url}{endpoint}", timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    version = data.get("version", "")
+                    if version:
+                        self._version = version
+                        return version
+            except Exception:
+                continue
+
+        self._version = "unbekannt"
+        return self._version
+
+    def get_stats(self) -> dict:
+        """Holt Statistiken (Anzahl) ohne alle Daten zu laden."""
+        stats = {}
+        for resource in ["tags", "correspondents", "document_types",
+                         "storage_paths", "documents"]:
+            try:
+                resp = self.session.get(
+                    f"{self.base_url}/api/{resource}/?page_size=1",
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Paperless gibt "count" in der paginierten Antwort zurück
+                    stats[resource] = data.get("count", len(data.get("results", [])))
+                elif resp.status_code == 404:
+                    # Endpoint existiert nicht in dieser Version
+                    stats[resource] = -1
+                else:
+                    stats[resource] = 0
+            except Exception:
+                stats[resource] = 0
+        return stats
+
+    def check_endpoint_available(self, resource: str) -> bool:
+        """Prüft ob ein API-Endpoint existiert (für Versionskompatibilität)."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/api/{resource}/?page_size=1",
+                timeout=10,
+            )
+            return resp.status_code != 404
+        except Exception:
+            return False
+
+    def get_available_endpoints(self) -> set:
+        """Ermittelt welche Endpoints verfügbar sind."""
+        if self._available_endpoints is not None:
+            return self._available_endpoints
+
+        available = set()
+        all_endpoints = set(MIGRATION_ORDER) | {"documents"}
+        for ep in all_endpoints:
+            if self.check_endpoint_available(ep):
+                available.add(ep)
+
+        self._available_endpoints = available
+        return available
+
+    def _fix_pagination_url(self, url: str) -> str:
+        """
+        Korrigiert Pagination-URLs die auf den internen Docker-Hostnamen zeigen.
+        Paperless gibt bei 'next' manchmal http://localhost:8000/... zurück
+        statt der konfigurierten externen URL.
+        """
+        if not url:
+            return url
+        parsed_next = urlparse(url)
+        parsed_base = urlparse(self.base_url)
+        # Schema und Host durch unsere konfigurierte URL ersetzen
+        fixed = parsed_next._replace(
+            scheme=parsed_base.scheme,
+            netloc=parsed_base.netloc,
+        )
+        return urlunparse(fixed)
 
     def get_all(self, resource: str) -> list:
         """Holt alle Einträge eines Ressourcentyps (mit Pagination)."""
         results = []
         url = f"{self.base_url}/api/{resource}/?page_size=100"
         while url:
-            resp = self.session.get(url, timeout=30)
+            resp = self.session.get(url, timeout=60)
             resp.raise_for_status()
             data = resp.json()
-            if "results" in data:
+            if isinstance(data, dict) and "results" in data:
                 results.extend(data["results"])
-                url = data.get("next")
+                next_url = data.get("next")
+                url = self._fix_pagination_url(next_url) if next_url else None
+            elif isinstance(data, list):
+                results.extend(data)
+                break
             else:
-                if isinstance(data, list):
-                    results.extend(data)
                 break
         return results
 
@@ -138,7 +246,7 @@ class PaperlessAPI:
             resp = self.session.post(
                 f"{self.base_url}/api/{resource}/",
                 json=data,
-                timeout=30,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()
@@ -149,14 +257,14 @@ class PaperlessAPI:
                     detail = str(e.response.json())
                 except Exception:
                     detail = e.response.text[:300]
-            raise RuntimeError(f"Erstellen fehlgeschlagen: {e} - {detail}")
+            raise RuntimeError(f"HTTP {e.response.status_code if e.response else '?'}: {detail}")
 
     def update(self, resource: str, resource_id: int, data: dict) -> dict | None:
         try:
             resp = self.session.patch(
                 f"{self.base_url}/api/{resource}/{resource_id}/",
                 json=data,
-                timeout=30,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()
@@ -168,7 +276,7 @@ class PaperlessAPI:
             resp = self.session.get(
                 f"{self.base_url}/api/documents/{doc_id}/download/",
                 stream=True,
-                timeout=120,
+                timeout=300,
             )
             resp.raise_for_status()
             with open(filepath, "wb") as f:
@@ -176,26 +284,33 @@ class PaperlessAPI:
                     f.write(chunk)
             return True
         except Exception:
+            # Teildatei aufräumen
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except OSError:
+                pass
             return False
 
     def upload_document(self, filepath: str, metadata: dict) -> str | None:
         try:
-            files = {"document": open(filepath, "rb")}
-            form_data = {}
-            for key in ("title", "created", "correspondent", "document_type",
-                        "storage_path", "archive_serial_number"):
-                if metadata.get(key):
-                    form_data[key] = str(metadata[key])
+            with open(filepath, "rb") as f:
+                files = {"document": f}
+                form_data = {}
+                for key in ("title", "created", "correspondent", "document_type",
+                            "storage_path", "archive_serial_number"):
+                    val = metadata.get(key)
+                    if val is not None and val != "":
+                        form_data[key] = str(val)
 
-            resp = self.session.post(
-                f"{self.base_url}/api/documents/post_document/",
-                files=files,
-                data=form_data,
-                timeout=120,
-            )
-            files["document"].close()
-            resp.raise_for_status()
-            return resp.text.strip().strip('"')
+                resp = self.session.post(
+                    f"{self.base_url}/api/documents/post_document/",
+                    files=files,
+                    data=form_data,
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                return resp.text.strip().strip('"')
         except Exception:
             return None
 
@@ -214,11 +329,17 @@ class PaperlessAPI:
                     task = task_list[0]
                     status = task.get("status", "")
                     if status == "SUCCESS":
+                        # Verschiedene Wege die Dokument-ID zu finden (Versionskompatibilität)
                         related_doc = task.get("related_document")
                         if isinstance(related_doc, int):
                             return related_doc
                         if isinstance(related_doc, str) and related_doc.isdigit():
                             return int(related_doc)
+                        # Manche Versionen geben die ID als URL zurück
+                        if isinstance(related_doc, str) and "/api/documents/" in related_doc:
+                            parts = related_doc.rstrip("/").split("/")
+                            if parts[-1].isdigit():
+                                return int(parts[-1])
                         result = task.get("result", "")
                         if isinstance(result, str):
                             for word in result.split():
@@ -239,7 +360,11 @@ class PaperlessAPI:
                 timeout=30,
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            # Manche Versionen geben ein Dict mit "results" zurück
+            if isinstance(data, dict):
+                return data.get("results", data.get("notes", []))
+            return data if isinstance(data, list) else []
         except Exception:
             return []
 
@@ -257,12 +382,15 @@ class PaperlessAPI:
 
     def search_documents(self, title: str) -> list:
         try:
+            # Sonderzeichen im Titel escapen
+            safe_title = requests.utils.quote(title, safe="")
             resp = self.session.get(
-                f"{self.base_url}/api/documents/?title__icontains={requests.utils.quote(title)}&page_size=10",
+                f"{self.base_url}/api/documents/?title__icontains={safe_title}&page_size=5",
                 timeout=30,
             )
             resp.raise_for_status()
-            return resp.json().get("results", [])
+            data = resp.json()
+            return data.get("results", []) if isinstance(data, dict) else []
         except Exception:
             return []
 
@@ -344,6 +472,25 @@ class MigrationRunner:
         try:
             self.emit("start", message="Migration gestartet")
 
+            # Verbindung nochmal prüfen bevor wir loslegen
+            self.emit("item", status="info", message="Prüfe Verbindungen...")
+            source_test = self.source.test_connection()
+            if not source_test["ok"]:
+                self.emit("error", message=f"Source-Verbindung fehlgeschlagen: {source_test['message']}")
+                self.emit("complete", message="Migration fehlgeschlagen", summary=self.summary)
+                return
+
+            target_test = self.target.test_connection()
+            if not target_test["ok"]:
+                self.emit("error", message=f"Target-Verbindung fehlgeschlagen: {target_test['message']}")
+                self.emit("complete", message="Migration fehlgeschlagen", summary=self.summary)
+                return
+
+            # Verfügbare Endpoints ermitteln
+            self.emit("item", status="info", message="Ermittle verfügbare API-Endpoints...")
+            source_endpoints = self.source.get_available_endpoints()
+            target_endpoints = self.target.get_available_endpoints()
+
             # Phase 1: Einstellungen
             self.emit("phase", message="Phase 1: Einstellungen migrieren", phase=1)
 
@@ -356,6 +503,20 @@ class MigrationRunner:
                     continue
 
                 label = RESOURCE_LABELS.get(resource, resource)
+
+                # Prüfen ob Endpoint auf beiden Seiten existiert
+                if resource in OPTIONAL_ENDPOINTS:
+                    if resource not in source_endpoints:
+                        self.emit("item", status="warn",
+                                  message=f"{label}: Endpoint existiert nicht auf Source (ältere Version?) - übersprungen")
+                        self.summary[resource] = {"created": 0, "skipped": 0, "failed": 0}
+                        continue
+                    if resource not in target_endpoints:
+                        self.emit("item", status="warn",
+                                  message=f"{label}: Endpoint existiert nicht auf Target (ältere Version?) - übersprungen")
+                        self.summary[resource] = {"created": 0, "skipped": 0, "failed": 0}
+                        continue
+
                 self.emit("resource_start", resource=resource, label=label)
                 mapping = self._migrate_resource(resource)
                 self.id_mapping[resource] = mapping
@@ -384,7 +545,7 @@ class MigrationRunner:
             self.emit("complete", message="Migration abgeschlossen!", summary=self.summary)
 
         except Exception as e:
-            self.emit("error", message=f"Unerwarteter Fehler: {e}")
+            self.emit("error", message=f"Unerwarteter Fehler: {type(e).__name__}: {e}")
             self.emit("complete", message="Migration mit Fehlern beendet", summary=self.summary)
 
     def _migrate_resource(self, resource: str) -> dict:
@@ -393,9 +554,16 @@ class MigrationRunner:
 
         try:
             source_items = self.source.get_all(resource)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            self.emit("item", status="error",
+                      message=f"Konnte {label} nicht laden (HTTP {status})")
+            self.summary[resource] = {"created": 0, "skipped": 0, "failed": 0}
+            return mapping
         except Exception as e:
             self.emit("item", status="error",
-                      message=f"Konnte {label} nicht laden: {e}")
+                      message=f"Konnte {label} nicht laden: {type(e).__name__}: {e}")
+            self.summary[resource] = {"created": 0, "skipped": 0, "failed": 0}
             return mapping
 
         try:
@@ -503,6 +671,10 @@ class MigrationRunner:
                 failed += 1
                 continue
 
+            file_size = os.path.getsize(download_path) if os.path.exists(download_path) else 0
+            self.emit("item", status="info",
+                      message=f"'{title}' heruntergeladen ({file_size / 1024:.0f} KB)")
+
             # Metadaten vorbereiten
             metadata = {"title": title, "created": created_date}
 
@@ -539,12 +711,17 @@ class MigrationRunner:
                 continue
 
             # Auf Verarbeitung warten
+            self.emit("item", status="info",
+                      message=f"'{title}' hochgeladen, warte auf Verarbeitung...")
             new_doc_id = self.target.wait_for_task(task_id)
 
             if not new_doc_id:
+                # Fallback: per Titel suchen
                 found = self.target.search_documents(title)
                 if found:
                     new_doc_id = found[0]["id"]
+                    self.emit("item", status="info",
+                              message=f"'{title}' per Suche gefunden (ID: {new_doc_id})")
 
             if new_doc_id:
                 doc_mapping[doc_id] = new_doc_id
@@ -554,7 +731,10 @@ class MigrationRunner:
                     tag_map = self.id_mapping.get("tags", {})
                     new_tags = [tag_map[t] for t in doc["tags"] if t in tag_map]
                     if new_tags:
-                        self.target.update("documents", new_doc_id, {"tags": new_tags})
+                        result = self.target.update("documents", new_doc_id, {"tags": new_tags})
+                        if result:
+                            self.emit("item", status="ok",
+                                      message=f"'{title}': {len(new_tags)} Tags zugewiesen")
 
                 # Custom Fields zuweisen
                 if doc.get("custom_fields"):
@@ -567,7 +747,7 @@ class MigrationRunner:
                     if new_cfs:
                         self.target.update("documents", new_doc_id, {"custom_fields": new_cfs})
 
-                self.emit("item", status="ok", message=f"'{title}' migriert")
+                self.emit("item", status="ok", message=f"'{title}' migriert (ID: {doc_id} -> {new_doc_id})")
                 created += 1
             else:
                 self.emit("item", status="error",
@@ -593,6 +773,7 @@ class MigrationRunner:
             return
 
         total_notes = 0
+        failed_notes = 0
         for old_id, new_id in self.doc_mapping.items():
             if self.is_cancelled():
                 break
@@ -610,6 +791,11 @@ class MigrationRunner:
                     continue
                 if self.target.add_document_note(new_id, note_text):
                     total_notes += 1
+                else:
+                    failed_notes += 1
 
-        self.summary["document_notes"] = {"created": total_notes, "skipped": 0, "failed": 0}
-        self.emit("item", status="info", message=f"Notizen: {total_notes} migriert")
+        self.summary["document_notes"] = {
+            "created": total_notes, "skipped": 0, "failed": failed_notes
+        }
+        self.emit("item", status="info",
+                  message=f"Notizen: {total_notes} migriert, {failed_notes} fehlgeschlagen")

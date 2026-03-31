@@ -23,9 +23,6 @@
         .log-container::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulse-ring { 0% { transform: scale(0.8); opacity: 1; } 100% { transform: scale(1.4); opacity: 0; } }
-        .status-pulse { position: relative; }
-        .status-pulse::after { content: ''; position: absolute; inset: -4px; border-radius: 9999px; border: 2px solid currentColor; animation: pulse-ring 1.5s ease-out infinite; }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
@@ -70,7 +67,7 @@
                             <input id="source-token" type="password" placeholder="Token aus Profil -> API Token"
                                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
                         </div>
-                        <button onclick="testConnection('source')"
+                        <button onclick="testConnection('source')" id="source-test-btn"
                                 class="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-sm rounded-lg px-4 py-2 transition flex items-center justify-center gap-2">
                             <span id="source-btn-text">Verbindung testen</span>
                             <span id="source-spinner" class="hidden">
@@ -98,7 +95,7 @@
                             <input id="target-token" type="password" placeholder="Token aus Profil -> API Token"
                                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
                         </div>
-                        <button onclick="testConnection('target')"
+                        <button onclick="testConnection('target')" id="target-test-btn"
                                 class="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-sm rounded-lg px-4 py-2 transition flex items-center justify-center gap-2">
                             <span id="target-btn-text">Verbindung testen</span>
                             <span id="target-spinner" class="hidden">
@@ -180,7 +177,7 @@
                 </div>
 
                 <button onclick="startMigration()" id="btn-start"
-                        class="mt-6 w-full bg-paperless-600 hover:bg-paperless-700 text-white font-semibold rounded-lg px-6 py-3 transition flex items-center justify-center gap-2 text-sm">
+                        class="mt-6 w-full bg-paperless-600 hover:bg-paperless-700 text-white font-semibold rounded-lg px-6 py-3 transition flex items-center justify-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                     Migration starten
                 </button>
@@ -279,6 +276,7 @@
         const statusEl = document.getElementById(`${side}-status`);
         const spinner = document.getElementById(`${side}-spinner`);
         const btnText = document.getElementById(`${side}-btn-text`);
+        const btn = document.getElementById(`${side}-test-btn`);
 
         if (!url || !token) {
             showStatus(statusEl, false, 'Bitte URL und Token eingeben.');
@@ -287,6 +285,7 @@
 
         spinner.classList.remove('hidden');
         btnText.textContent = 'Teste...';
+        btn.disabled = true;
 
         try {
             const resp = await fetch('/api/test-connection', {
@@ -294,34 +293,55 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, token })
             });
+
+            if (!resp.ok && resp.status >= 500) {
+                showStatus(statusEl, false, `Server-Fehler (${resp.status}). Bitte Logs prüfen.`);
+                if (side === 'source') sourceOk = false;
+                else targetOk = false;
+                return;
+            }
+
             const data = await resp.json();
 
             if (data.ok) {
                 let msg = data.message;
+                if (data.version) {
+                    msg += ` <span class="text-gray-400">(Version: ${escapeHtml(data.version)})</span>`;
+                }
                 if (data.stats) {
                     msg += `<br><span class="text-gray-400 text-xs mt-1 block">`;
-                    msg += `${data.stats.documents || 0} Dokumente, `;
-                    msg += `${data.stats.tags || 0} Tags, `;
-                    msg += `${data.stats.correspondents || 0} Korrespondenten, `;
-                    msg += `${data.stats.document_types || 0} Dokumenttypen`;
+                    const s = data.stats;
+                    if (s.documents >= 0) msg += `${s.documents} Dokumente, `;
+                    if (s.tags >= 0) msg += `${s.tags} Tags, `;
+                    if (s.correspondents >= 0) msg += `${s.correspondents} Korrespondenten, `;
+                    if (s.document_types >= 0) msg += `${s.document_types} Dokumenttypen`;
+                    if (s.storage_paths === -1) msg += `<br><span class="text-yellow-500">Speicherpfade: nicht verfügbar (ältere Version)</span>`;
                     msg += `</span>`;
                 }
                 showStatus(statusEl, true, msg);
                 if (side === 'source') sourceOk = true;
                 else targetOk = true;
             } else {
-                showStatus(statusEl, false, data.message);
+                showStatus(statusEl, false, escapeHtml(data.message));
                 if (side === 'source') sourceOk = false;
                 else targetOk = false;
             }
         } catch (e) {
-            showStatus(statusEl, false, `Fehler: ${e.message}`);
+            showStatus(statusEl, false, `Netzwerkfehler: ${escapeHtml(e.message)}`);
+            if (side === 'source') sourceOk = false;
+            else targetOk = false;
+        } finally {
+            spinner.classList.add('hidden');
+            btnText.textContent = 'Verbindung testen';
+            btn.disabled = false;
+            updateOptionsStep();
         }
+    }
 
-        spinner.classList.add('hidden');
-        btnText.textContent = 'Verbindung testen';
-
-        updateOptionsStep();
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     function showStatus(el, ok, message) {
@@ -351,29 +371,42 @@
 
     // Toggle All
     function toggleAll() {
-        const checkboxes = document.querySelectorAll('.migrate-option');
+        const checkboxes = document.querySelectorAll('.migrate-option:not(:disabled)');
         const allChecked = Array.from(checkboxes).every(cb => cb.checked);
         checkboxes.forEach(cb => cb.checked = !allChecked);
     }
 
     // Start Migration
     async function startMigration() {
+        // Gleiche-Instanz-Check im Frontend
+        const sourceUrl = document.getElementById('source-url').value.trim().replace(/\/+$/, '');
+        const targetUrl = document.getElementById('target-url').value.trim().replace(/\/+$/, '');
+        if (sourceUrl === targetUrl) {
+            showError('Quelle und Ziel dürfen nicht die gleiche Instanz sein!');
+            return;
+        }
+
         const options = {};
         document.querySelectorAll('.migrate-option').forEach(cb => {
             options[cb.dataset.key] = cb.checked;
         });
 
+        if (!Object.values(options).some(v => v)) {
+            showError('Bitte mindestens eine Option auswählen.');
+            return;
+        }
+
         const body = {
-            source_url: document.getElementById('source-url').value.trim(),
+            source_url: sourceUrl,
             source_token: document.getElementById('source-token').value.trim(),
-            target_url: document.getElementById('target-url').value.trim(),
+            target_url: targetUrl,
             target_token: document.getElementById('target-token').value.trim(),
             migrate: options
         };
 
         const btn = document.getElementById('btn-start');
         btn.disabled = true;
-        btn.textContent = 'Starte...';
+        btn.innerHTML = '<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Starte...';
 
         try {
             const resp = await fetch('/api/migrate/start', {
@@ -384,9 +417,9 @@
             const data = await resp.json();
 
             if (!data.ok) {
-                alert(data.message);
+                showError(data.message);
                 btn.disabled = false;
-                btn.textContent = 'Migration starten';
+                btn.innerHTML = 'Migration starten';
                 return;
             }
 
@@ -396,17 +429,35 @@
             document.getElementById('step-connections').classList.add('opacity-50', 'pointer-events-none');
             document.getElementById('step-options').classList.add('opacity-50', 'pointer-events-none');
             document.getElementById('step-progress').classList.remove('hidden');
+            document.getElementById('step-progress').scrollIntoView({ behavior: 'smooth' });
 
             // SSE starten
             startSSE();
         } catch (e) {
-            alert(`Fehler: ${e.message}`);
+            showError(`Netzwerkfehler: ${e.message}`);
             btn.disabled = false;
-            btn.textContent = 'Migration starten';
+            btn.innerHTML = 'Migration starten';
         }
     }
 
+    function showError(msg) {
+        // Inline-Fehlermeldung statt alert()
+        const existing = document.getElementById('inline-error');
+        if (existing) existing.remove();
+
+        const div = document.createElement('div');
+        div.id = 'inline-error';
+        div.className = 'mt-4 p-3 bg-red-900/30 border border-red-800 text-red-400 text-sm rounded-lg fade-in';
+        div.textContent = msg;
+        document.getElementById('btn-start').after(div);
+
+        setTimeout(() => div.remove(), 8000);
+    }
+
     // SSE Progress
+    let sseRetryCount = 0;
+    const SSE_MAX_RETRIES = 3;
+
     function startSSE() {
         const logContainer = document.getElementById('log-container');
         logContainer.innerHTML = '';
@@ -414,18 +465,48 @@
         eventSource = new EventSource(`/api/migrate/progress/${sessionId}`);
 
         eventSource.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            handleEvent(data);
+            sseRetryCount = 0; // Reset bei erfolgreicher Nachricht
+            try {
+                const data = JSON.parse(event.data);
+                handleEvent(data);
+            } catch (e) {
+                console.error('SSE parse error:', e);
+            }
         };
 
         eventSource.onerror = () => {
             eventSource.close();
+            sseRetryCount++;
+
+            if (sseRetryCount <= SSE_MAX_RETRIES) {
+                addLog('warn', `Verbindung unterbrochen, Neuverbindung (${sseRetryCount}/${SSE_MAX_RETRIES})...`);
+                setTimeout(() => {
+                    eventSource = new EventSource(`/api/migrate/progress/${sessionId}`);
+                    eventSource.onmessage = (event) => {
+                        sseRetryCount = 0;
+                        try {
+                            handleEvent(JSON.parse(event.data));
+                        } catch (e) {
+                            console.error('SSE parse error:', e);
+                        }
+                    };
+                    eventSource.onerror = () => {
+                        eventSource.close();
+                        sseRetryCount++;
+                        if (sseRetryCount > SSE_MAX_RETRIES) {
+                            addLog('error', 'Verbindung zum Server verloren. Bitte Seite neu laden.');
+                            document.getElementById('btn-cancel').classList.add('hidden');
+                        }
+                    };
+                }, 2000);
+            } else {
+                addLog('error', 'Verbindung zum Server verloren. Bitte Seite neu laden.');
+                document.getElementById('btn-cancel').classList.add('hidden');
+            }
         };
     }
 
     function handleEvent(data) {
-        const logContainer = document.getElementById('log-container');
-
         switch (data.type) {
             case 'start':
                 addLog('info', data.message);
@@ -445,7 +526,7 @@
                 break;
 
             case 'document_progress': {
-                const pct = Math.round((data.current / data.total) * 100);
+                const pct = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
                 document.getElementById('progress-bar').style.width = `${pct}%`;
                 document.getElementById('progress-text').textContent = `${data.current} / ${data.total}`;
                 const docProgress = document.getElementById('doc-progress');
@@ -456,7 +537,8 @@
 
             case 'item': {
                 const statusClass = data.status === 'ok' ? 'ok' :
-                                    data.status === 'error' ? 'error' : 'info';
+                                    data.status === 'error' ? 'error' :
+                                    data.status === 'warn' ? 'warn' : 'info';
                 addLog(statusClass, data.message);
                 break;
             }
@@ -479,8 +561,7 @@
                 document.getElementById('btn-cancel').classList.add('hidden');
                 if (eventSource) eventSource.close();
 
-                // Ergebnis anzeigen
-                if (data.summary) {
+                if (data.summary && Object.keys(data.summary).length > 0) {
                     showResults(data.summary);
                 }
                 break;
@@ -505,6 +586,10 @@
                 prefix = '[!!]';
                 colorClass = 'text-red-400';
                 break;
+            case 'warn':
+                prefix = '[!!]';
+                colorClass = 'text-yellow-400';
+                break;
             case 'phase':
                 prefix = '[>>]';
                 colorClass = 'text-paperless-400';
@@ -514,13 +599,14 @@
                 colorClass = 'text-gray-400';
         }
 
-        line.innerHTML = `<span class="text-gray-600">${time}</span> <span class="${colorClass}">${prefix}</span> ${message}`;
+        line.innerHTML = `<span class="text-gray-600">${time}</span> <span class="${colorClass}">${prefix}</span> ${escapeHtml(message)}`;
         logContainer.appendChild(line);
         logContainer.scrollTop = logContainer.scrollHeight;
     }
 
     function showResults(summary) {
         document.getElementById('step-results').classList.remove('hidden');
+        document.getElementById('step-results').scrollIntoView({ behavior: 'smooth' });
         const tbody = document.getElementById('results-body');
         tbody.innerHTML = '';
 
@@ -529,7 +615,7 @@
             const row = document.createElement('tr');
             row.classList.add('border-b', 'border-gray-800/50');
             row.innerHTML = `
-                <td class="py-2 font-medium">${label}</td>
+                <td class="py-2 font-medium">${escapeHtml(label)}</td>
                 <td class="py-2 text-center text-green-400">${stats.created || 0}</td>
                 <td class="py-2 text-center text-gray-400">${stats.skipped || 0}</td>
                 <td class="py-2 text-center ${stats.failed ? 'text-red-400 font-bold' : 'text-gray-500'}">${stats.failed || 0}</td>
