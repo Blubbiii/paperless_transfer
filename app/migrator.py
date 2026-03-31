@@ -130,18 +130,37 @@ class PaperlessAPI:
         if self._version is not None:
             return self._version
 
-        # Verschiedene Wege die Version zu bekommen
-        for endpoint in ["/api/ui_settings/", "/api/remote_version/"]:
+        # Verschiedene Wege die Version zu bekommen - nur sichere Endpoints nutzen
+        # /api/ui_settings/ und /api/remote_version/ geben bei manchen Versionen 406 zurück
+        for endpoint in ["/api/statistics/"]:
             try:
                 resp = self.session.get(f"{self.base_url}{endpoint}", timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
+                    # statistics endpoint hat manchmal version info
                     version = data.get("version", "")
                     if version:
                         self._version = version
                         return version
             except Exception:
                 continue
+
+        # Fallback: Prüfe ob neuere Features existieren um Version grob einzuschätzen
+        try:
+            resp = self.session.get(f"{self.base_url}/api/custom_fields/?page_size=1", timeout=5)
+            if resp.status_code == 200:
+                self._version = "2.x (Custom Fields verfügbar)"
+                return self._version
+        except Exception:
+            pass
+
+        try:
+            resp = self.session.get(f"{self.base_url}/api/tags/?page_size=1", timeout=5)
+            if resp.status_code == 200:
+                self._version = "1.x+"
+                return self._version
+        except Exception:
+            pass
 
         self._version = "unbekannt"
         return self._version

@@ -57,18 +57,22 @@ def test_connection():
     result = api.test_connection()
 
     # Wenn erfolgreich, Statistiken und Version holen
+    # Jeder Aufruf einzeln abgesichert - kein Fehler darf den Erfolg überschreiben
     if result["ok"]:
+        stats = {}
         try:
-            result["stats"] = api.get_stats()
-        except Exception:
-            result["stats"] = {}
-
-        try:
-            version = api.get_version()
-            if version and version != "unbekannt":
-                result["version"] = version
+            stats = api.get_stats()
         except Exception:
             pass
+        result["stats"] = stats
+
+        version = None
+        try:
+            version = api.get_version()
+        except Exception:
+            pass
+        if version and version != "unbekannt":
+            result["version"] = version
 
     return jsonify(result)
 
