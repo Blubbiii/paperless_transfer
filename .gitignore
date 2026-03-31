@@ -5,6 +5,7 @@ downloads/
 id_mapping.json
 paperless_backup_*.json
 datev_uploaded.json
+datev_config.json
 .env
 *.egg-info/
 dist/
