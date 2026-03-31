@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+downloads/
+id_mapping.json
+paperless_backup_*.json
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/

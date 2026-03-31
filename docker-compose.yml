@@ -1,0 +1,8 @@
+services:
+  paperless-migrator:
+    build: .
+    container_name: paperless-migrator
+    ports:
+      - "5000:5000"
+    # network_mode: host  # Einkommentieren falls die Paperless-Instanzen nicht erreichbar sind
+    restart: unless-stopped

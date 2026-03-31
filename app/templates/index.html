@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paperless-ngx Migration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        paperless: { 50: '#f0fdf4', 100: '#dcfce7', 500: '#22c55e', 600: '#16a34a', 700: '#15803d', 800: '#166534', 900: '#14532d' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .log-container { max-height: 400px; overflow-y: auto; }
+        .log-container::-webkit-scrollbar { width: 6px; }
+        .log-container::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse-ring { 0% { transform: scale(0.8); opacity: 1; } 100% { transform: scale(1.4); opacity: 0; } }
+        .status-pulse { position: relative; }
+        .status-pulse::after { content: ''; position: absolute; inset: -4px; border-radius: 9999px; border: 2px solid currentColor; animation: pulse-ring 1.5s ease-out infinite; }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+    <!-- Header -->
+    <header class="border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm sticky top-0 z-10">
+        <div class="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
+            <svg class="w-8 h-8 text-paperless-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            </svg>
+            <div>
+                <h1 class="text-xl font-bold">Paperless-ngx Migration</h1>
+                <p class="text-sm text-gray-400">Einstellungen & Dokumente übertragen</p>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-6 py-8 space-y-8">
+
+        <!-- Step 1: Connections -->
+        <section id="step-connections" class="fade-in">
+            <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                <span class="flex items-center justify-center w-7 h-7 rounded-full bg-paperless-600 text-sm font-bold">1</span>
+                Verbindungen konfigurieren
+            </h2>
+
+            <div class="grid md:grid-cols-2 gap-6">
+                <!-- Source -->
+                <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
+                    <h3 class="font-semibold text-orange-400 mb-4 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg>
+                        Quelle (alte Instanz)
+                    </h3>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="text-sm text-gray-400 block mb-1">URL</label>
+                            <input id="source-url" type="text" placeholder="http://192.168.1.100:8000"
+                                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
+                        </div>
+                        <div>
+                            <label class="text-sm text-gray-400 block mb-1">API Token</label>
+                            <input id="source-token" type="password" placeholder="Token aus Profil -> API Token"
+                                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
+                        </div>
+                        <button onclick="testConnection('source')"
+                                class="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-sm rounded-lg px-4 py-2 transition flex items-center justify-center gap-2">
+                            <span id="source-btn-text">Verbindung testen</span>
+                            <span id="source-spinner" class="hidden">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                            </span>
+                        </button>
+                        <div id="source-status" class="hidden text-sm rounded-lg p-3"></div>
+                    </div>
+                </div>
+
+                <!-- Target -->
+                <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
+                    <h3 class="font-semibold text-blue-400 mb-4 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                        Ziel (neue Instanz)
+                    </h3>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="text-sm text-gray-400 block mb-1">URL</label>
+                            <input id="target-url" type="text" placeholder="http://192.168.1.101:8000"
+                                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
+                        </div>
+                        <div>
+                            <label class="text-sm text-gray-400 block mb-1">API Token</label>
+                            <input id="target-token" type="password" placeholder="Token aus Profil -> API Token"
+                                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-paperless-500 transition">
+                        </div>
+                        <button onclick="testConnection('target')"
+                                class="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-sm rounded-lg px-4 py-2 transition flex items-center justify-center gap-2">
+                            <span id="target-btn-text">Verbindung testen</span>
+                            <span id="target-spinner" class="hidden">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                            </span>
+                        </button>
+                        <div id="target-status" class="hidden text-sm rounded-lg p-3"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Step 2: Options -->
+        <section id="step-options" class="fade-in opacity-50 pointer-events-none transition-opacity">
+            <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                <span class="flex items-center justify-center w-7 h-7 rounded-full bg-gray-700 text-sm font-bold" id="step2-badge">2</span>
+                Was soll migriert werden?
+            </h2>
+
+            <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <span class="text-sm text-gray-400">Optionen auswählen</span>
+                    <button onclick="toggleAll()" class="text-xs text-paperless-500 hover:text-paperless-400 transition">
+                        Alle an/aus
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="tags" checked>
+                        <span class="text-sm">Tags</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="correspondents" checked>
+                        <span class="text-sm">Korrespondenten</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="document_types" checked>
+                        <span class="text-sm">Dokumenttypen</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="storage_paths" checked>
+                        <span class="text-sm">Speicherpfade</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="custom_fields" checked>
+                        <span class="text-sm">Custom Fields</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="saved_views" checked>
+                        <span class="text-sm">Gespeicherte Ansichten</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="mail_accounts" checked>
+                        <span class="text-sm">Mail-Konten</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="mail_rules" checked>
+                        <span class="text-sm">Mail-Regeln</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="workflows" checked>
+                        <span class="text-sm">Workflows</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition border-t border-gray-700 col-span-2 md:col-span-3 mt-2 pt-3">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="documents" checked id="opt-documents">
+                        <div>
+                            <span class="text-sm font-semibold">Dokumente</span>
+                            <span class="text-xs text-gray-400 block">PDFs herunterladen & neu hochladen (kann dauern)</span>
+                        </div>
+                    </label>
+                    <label class="flex items-center gap-2 bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-750 transition col-span-2 md:col-span-3">
+                        <input type="checkbox" class="migrate-option accent-green-500" data-key="document_notes" checked id="opt-notes">
+                        <div>
+                            <span class="text-sm">Dokument-Notizen</span>
+                            <span class="text-xs text-gray-400 block">Kommentare auf Dokumenten</span>
+                        </div>
+                    </label>
+                </div>
+
+                <button onclick="startMigration()" id="btn-start"
+                        class="mt-6 w-full bg-paperless-600 hover:bg-paperless-700 text-white font-semibold rounded-lg px-6 py-3 transition flex items-center justify-center gap-2 text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Migration starten
+                </button>
+            </div>
+        </section>
+
+        <!-- Step 3: Progress -->
+        <section id="step-progress" class="hidden fade-in">
+            <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                <span class="flex items-center justify-center w-7 h-7 rounded-full bg-paperless-600 text-sm font-bold">3</span>
+                <span id="progress-title">Migration läuft...</span>
+            </h2>
+
+            <div class="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+                <!-- Phase -->
+                <div id="phase-label" class="text-sm font-medium text-paperless-400"></div>
+
+                <!-- Progress Bar -->
+                <div class="relative">
+                    <div class="w-full bg-gray-800 rounded-full h-3 overflow-hidden">
+                        <div id="progress-bar" class="bg-paperless-500 h-3 rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                    <span id="progress-text" class="absolute right-0 -top-5 text-xs text-gray-400"></span>
+                </div>
+
+                <!-- Document Progress -->
+                <div id="doc-progress" class="hidden text-sm text-gray-400"></div>
+
+                <!-- Log -->
+                <div class="log-container bg-gray-950 rounded-lg p-4 font-mono text-xs space-y-1" id="log-container">
+                    <div class="text-gray-500">Warte auf Events...</div>
+                </div>
+
+                <!-- Cancel Button -->
+                <button onclick="cancelMigration()" id="btn-cancel"
+                        class="bg-red-900/30 hover:bg-red-900/50 border border-red-800 text-red-400 text-sm rounded-lg px-4 py-2 transition">
+                    Migration abbrechen
+                </button>
+            </div>
+        </section>
+
+        <!-- Step 4: Results -->
+        <section id="step-results" class="hidden fade-in">
+            <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                <span class="flex items-center justify-center w-7 h-7 rounded-full bg-paperless-600 text-sm font-bold">4</span>
+                Ergebnis
+            </h2>
+
+            <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-800">
+                            <th class="pb-2">Ressource</th>
+                            <th class="pb-2 text-center">Erstellt</th>
+                            <th class="pb-2 text-center">Übersprungen</th>
+                            <th class="pb-2 text-center">Fehlgeschlagen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body"></tbody>
+                </table>
+
+                <button onclick="location.reload()"
+                        class="mt-6 bg-gray-800 hover:bg-gray-700 border border-gray-600 text-sm rounded-lg px-4 py-2 transition">
+                    Neue Migration starten
+                </button>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="border-t border-gray-800 mt-12">
+        <div class="max-w-5xl mx-auto px-6 py-4 text-center text-xs text-gray-600">
+            Paperless-ngx Migration Tool
+        </div>
+    </footer>
+
+<script>
+    // State
+    let sourceOk = false;
+    let targetOk = false;
+    let sessionId = null;
+    let eventSource = null;
+
+    const RESOURCE_LABELS = {
+        tags: 'Tags', correspondents: 'Korrespondenten', document_types: 'Dokumenttypen',
+        storage_paths: 'Speicherpfade', custom_fields: 'Custom Fields',
+        saved_views: 'Gespeicherte Ansichten', mail_accounts: 'Mail-Konten',
+        mail_rules: 'Mail-Regeln', workflows: 'Workflows',
+        documents: 'Dokumente', document_notes: 'Notizen'
+    };
+
+    // Test Connection
+    async function testConnection(side) {
+        const url = document.getElementById(`${side}-url`).value.trim();
+        const token = document.getElementById(`${side}-token`).value.trim();
+        const statusEl = document.getElementById(`${side}-status`);
+        const spinner = document.getElementById(`${side}-spinner`);
+        const btnText = document.getElementById(`${side}-btn-text`);
+
+        if (!url || !token) {
+            showStatus(statusEl, false, 'Bitte URL und Token eingeben.');
+            return;
+        }
+
+        spinner.classList.remove('hidden');
+        btnText.textContent = 'Teste...';
+
+        try {
+            const resp = await fetch('/api/test-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, token })
+            });
+            const data = await resp.json();
+
+            if (data.ok) {
+                let msg = data.message;
+                if (data.stats) {
+                    msg += `<br><span class="text-gray-400 text-xs mt-1 block">`;
+                    msg += `${data.stats.documents || 0} Dokumente, `;
+                    msg += `${data.stats.tags || 0} Tags, `;
+                    msg += `${data.stats.correspondents || 0} Korrespondenten, `;
+                    msg += `${data.stats.document_types || 0} Dokumenttypen`;
+                    msg += `</span>`;
+                }
+                showStatus(statusEl, true, msg);
+                if (side === 'source') sourceOk = true;
+                else targetOk = true;
+            } else {
+                showStatus(statusEl, false, data.message);
+                if (side === 'source') sourceOk = false;
+                else targetOk = false;
+            }
+        } catch (e) {
+            showStatus(statusEl, false, `Fehler: ${e.message}`);
+        }
+
+        spinner.classList.add('hidden');
+        btnText.textContent = 'Verbindung testen';
+
+        updateOptionsStep();
+    }
+
+    function showStatus(el, ok, message) {
+        el.classList.remove('hidden', 'bg-green-900/30', 'border-green-800', 'text-green-400',
+                           'bg-red-900/30', 'border-red-800', 'text-red-400');
+        if (ok) {
+            el.classList.add('bg-green-900/30', 'border', 'border-green-800', 'text-green-400');
+        } else {
+            el.classList.add('bg-red-900/30', 'border', 'border-red-800', 'text-red-400');
+        }
+        el.innerHTML = message;
+    }
+
+    function updateOptionsStep() {
+        const section = document.getElementById('step-options');
+        const badge = document.getElementById('step2-badge');
+        if (sourceOk && targetOk) {
+            section.classList.remove('opacity-50', 'pointer-events-none');
+            badge.classList.remove('bg-gray-700');
+            badge.classList.add('bg-paperless-600');
+        } else {
+            section.classList.add('opacity-50', 'pointer-events-none');
+            badge.classList.add('bg-gray-700');
+            badge.classList.remove('bg-paperless-600');
+        }
+    }
+
+    // Toggle All
+    function toggleAll() {
+        const checkboxes = document.querySelectorAll('.migrate-option');
+        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+        checkboxes.forEach(cb => cb.checked = !allChecked);
+    }
+
+    // Start Migration
+    async function startMigration() {
+        const options = {};
+        document.querySelectorAll('.migrate-option').forEach(cb => {
+            options[cb.dataset.key] = cb.checked;
+        });
+
+        const body = {
+            source_url: document.getElementById('source-url').value.trim(),
+            source_token: document.getElementById('source-token').value.trim(),
+            target_url: document.getElementById('target-url').value.trim(),
+            target_token: document.getElementById('target-token').value.trim(),
+            migrate: options
+        };
+
+        const btn = document.getElementById('btn-start');
+        btn.disabled = true;
+        btn.textContent = 'Starte...';
+
+        try {
+            const resp = await fetch('/api/migrate/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await resp.json();
+
+            if (!data.ok) {
+                alert(data.message);
+                btn.disabled = false;
+                btn.textContent = 'Migration starten';
+                return;
+            }
+
+            sessionId = data.session_id;
+
+            // UI umschalten
+            document.getElementById('step-connections').classList.add('opacity-50', 'pointer-events-none');
+            document.getElementById('step-options').classList.add('opacity-50', 'pointer-events-none');
+            document.getElementById('step-progress').classList.remove('hidden');
+
+            // SSE starten
+            startSSE();
+        } catch (e) {
+            alert(`Fehler: ${e.message}`);
+            btn.disabled = false;
+            btn.textContent = 'Migration starten';
+        }
+    }
+
+    // SSE Progress
+    function startSSE() {
+        const logContainer = document.getElementById('log-container');
+        logContainer.innerHTML = '';
+
+        eventSource = new EventSource(`/api/migrate/progress/${sessionId}`);
+
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleEvent(data);
+        };
+
+        eventSource.onerror = () => {
+            eventSource.close();
+        };
+    }
+
+    function handleEvent(data) {
+        const logContainer = document.getElementById('log-container');
+
+        switch (data.type) {
+            case 'start':
+                addLog('info', data.message);
+                break;
+
+            case 'phase':
+                document.getElementById('phase-label').textContent = data.message;
+                addLog('phase', data.message);
+                break;
+
+            case 'resource_start':
+                addLog('info', `Migriere ${data.label}...`);
+                break;
+
+            case 'resource_done':
+                addLog('ok', `${data.label}: ${data.count} gemappt`);
+                break;
+
+            case 'document_progress': {
+                const pct = Math.round((data.current / data.total) * 100);
+                document.getElementById('progress-bar').style.width = `${pct}%`;
+                document.getElementById('progress-text').textContent = `${data.current} / ${data.total}`;
+                const docProgress = document.getElementById('doc-progress');
+                docProgress.classList.remove('hidden');
+                docProgress.textContent = data.message;
+                break;
+            }
+
+            case 'item': {
+                const statusClass = data.status === 'ok' ? 'ok' :
+                                    data.status === 'error' ? 'error' : 'info';
+                addLog(statusClass, data.message);
+                break;
+            }
+
+            case 'cancelled':
+                addLog('error', data.message);
+                document.getElementById('progress-title').textContent = 'Migration abgebrochen';
+                document.getElementById('btn-cancel').classList.add('hidden');
+                if (eventSource) eventSource.close();
+                break;
+
+            case 'error':
+                addLog('error', data.message);
+                break;
+
+            case 'complete':
+                addLog('phase', data.message);
+                document.getElementById('progress-title').textContent = data.message;
+                document.getElementById('progress-bar').style.width = '100%';
+                document.getElementById('btn-cancel').classList.add('hidden');
+                if (eventSource) eventSource.close();
+
+                // Ergebnis anzeigen
+                if (data.summary) {
+                    showResults(data.summary);
+                }
+                break;
+        }
+    }
+
+    function addLog(type, message) {
+        const logContainer = document.getElementById('log-container');
+        const line = document.createElement('div');
+        line.classList.add('fade-in');
+
+        const time = new Date().toLocaleTimeString('de-DE');
+        let prefix = '';
+        let colorClass = 'text-gray-400';
+
+        switch (type) {
+            case 'ok':
+                prefix = '[OK]';
+                colorClass = 'text-green-400';
+                break;
+            case 'error':
+                prefix = '[!!]';
+                colorClass = 'text-red-400';
+                break;
+            case 'phase':
+                prefix = '[>>]';
+                colorClass = 'text-paperless-400';
+                break;
+            default:
+                prefix = '[..]';
+                colorClass = 'text-gray-400';
+        }
+
+        line.innerHTML = `<span class="text-gray-600">${time}</span> <span class="${colorClass}">${prefix}</span> ${message}`;
+        logContainer.appendChild(line);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    function showResults(summary) {
+        document.getElementById('step-results').classList.remove('hidden');
+        const tbody = document.getElementById('results-body');
+        tbody.innerHTML = '';
+
+        for (const [resource, stats] of Object.entries(summary)) {
+            const label = RESOURCE_LABELS[resource] || resource;
+            const row = document.createElement('tr');
+            row.classList.add('border-b', 'border-gray-800/50');
+            row.innerHTML = `
+                <td class="py-2 font-medium">${label}</td>
+                <td class="py-2 text-center text-green-400">${stats.created || 0}</td>
+                <td class="py-2 text-center text-gray-400">${stats.skipped || 0}</td>
+                <td class="py-2 text-center ${stats.failed ? 'text-red-400 font-bold' : 'text-gray-500'}">${stats.failed || 0}</td>
+            `;
+            tbody.appendChild(row);
+        }
+    }
+
+    // Cancel Migration
+    async function cancelMigration() {
+        if (!sessionId) return;
+        if (!confirm('Migration wirklich abbrechen?')) return;
+
+        try {
+            await fetch(`/api/migrate/cancel/${sessionId}`, { method: 'POST' });
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    // Notes checkbox depends on documents
+    document.getElementById('opt-documents').addEventListener('change', function() {
+        const notesOpt = document.getElementById('opt-notes');
+        if (!this.checked) {
+            notesOpt.checked = false;
+            notesOpt.disabled = true;
+        } else {
+            notesOpt.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>
